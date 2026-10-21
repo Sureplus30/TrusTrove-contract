@@ -504,15 +504,21 @@ impl RegistryContract {
     }
 
     pub fn get_verification_status(env: Env, address: Address) -> VerificationStatus {
-        match env
-            .storage()
-            .persistent()
-            .get::<_, Profile>(&DataKey::Profile(address))
-        {
+        let key = DataKey::Profile(address);
+        match env.storage().persistent().get::<_, Profile>(&key) {
             None => VerificationStatus::Unregistered,
-            Some(p) if p.verified() => VerificationStatus::Verified,
-            Some(p) if p.revoked() => VerificationStatus::Revoked,
-            Some(_) => VerificationStatus::Pending,
+            Some(profile) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                if profile.verified() {
+                    VerificationStatus::Verified
+                } else if profile.revoked() {
+                    VerificationStatus::Revoked
+                } else {
+                    VerificationStatus::Pending
+                }
+            }
         }
     }
 
