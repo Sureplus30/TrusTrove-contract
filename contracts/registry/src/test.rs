@@ -171,13 +171,13 @@ fn test_revoke_already_revoked_returns_true_no_reemit() {
     client.register_issuer(&issuer, &map![&env]);
     assert!(!client.is_verified(&issuer));
 
-    // First revoke — should be a no-op (already unverified) and return true.
+    // First revoke transitions Pending to Revoked.
     let result = client.revoke(&issuer);
     assert!(result);
     assert!(!client.is_verified(&issuer));
     assert_eq!(
         client.get_verification_status(&issuer),
-        VerificationStatus::Pending
+        VerificationStatus::Revoked
     );
 
     // Second revoke on already-unverified profile — should succeed
@@ -187,8 +187,9 @@ fn test_revoke_already_revoked_returns_true_no_reemit() {
     assert!(!client.is_verified(&issuer));
     assert_eq!(
         client.get_verification_status(&issuer),
-        VerificationStatus::Pending
+        VerificationStatus::Revoked
     );
+    assert_eq!(count_events_named(&env, "address_revoked"), 1);
 }
 
 #[test]
@@ -2309,16 +2310,16 @@ fn test_documented_verification_state_transitions() {
         VerificationStatus::Verified
     );
 
-    // revoke is a documented no-op on a never-verified (Pending) profile.
+    // Admin revoke transitions a never-verified (Pending) profile to Revoked.
     let pending = Address::generate(&env);
     client.register_buyer(&pending, &metadata);
     client.revoke(&pending);
     assert_eq!(
         client.get_verification_status(&pending),
-        VerificationStatus::Pending
+        VerificationStatus::Revoked
     );
 
-    // Pending -> Revoked via verify_profile(_, false) (admin or verifier).
+    // Revoked remains Revoked via verify_profile(_, false) (admin or verifier).
     client.verify_profile(&admin, &pending, &false);
     assert_eq!(
         client.get_verification_status(&pending),
@@ -4296,4 +4297,57 @@ fn test_batch_issuers_invalid_late_metadata_is_atomic_for_storage_events_and_ttl
         instance_ttl_after, instance_ttl_before,
         "failed batch must not extend instance TTL"
     );
+fn test_revoke_pending_verified_and_revoked_transitions() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let pending = Address::generate(&env);
+    let verified = Address::generate(&env);
+    client.register_issuer(&pending, &map![&env]);
+    client.register_issuer(&verified, &map![&env]);
+    client.verify_profile(&admin, &verified, &true);
+
+    assert_eq!(
+        client.get_verification_status(&pending),
+        VerificationStatus::Pending
+    );
+    assert_eq!(
+        client.get_verification_status(&verified),
+        VerificationStatus::Verified
+    );
+    assert_eq!(count_events_named(&env, "address_revoked"), 0);
+
+    assert!(client.revoke(&pending));
+    assert_eq!(
+        client.get_verification_status(&pending),
+        VerificationStatus::Revoked
+    );
+    let pending_profile = client.get_profile(&pending);
+    assert!(!pending_profile.verified());
+    assert!(pending_profile.revoked());
+    assert!(!client.is_verified(&pending));
+    assert_eq!(count_events_named(&env, "address_revoked"), 1);
+
+    assert!(client.revoke(&verified));
+    assert_eq!(
+        client.get_verification_status(&verified),
+        VerificationStatus::Revoked
+    );
+    let verified_profile = client.get_profile(&verified);
+    assert!(!verified_profile.verified());
+    assert!(verified_profile.revoked());
+    assert!(!client.is_verified(&verified));
+    assert_eq!(count_events_named(&env, "address_revoked"), 2);
+
+    assert!(client.revoke(&pending));
+    assert!(client.revoke(&verified));
+    assert_eq!(
+        client.get_verification_status(&pending),
+        VerificationStatus::Revoked
+    );
+    assert_eq!(
+        client.get_verification_status(&verified),
+        VerificationStatus::Revoked
+    );
+    assert_eq!(count_events_named(&env, "address_revoked"), 2);
 }
