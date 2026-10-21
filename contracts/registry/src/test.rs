@@ -4245,12 +4245,21 @@ fn test_revoke_pending_verified_and_revoked_transitions() {
     client.register_issuer(&verified, &map![&env]);
     client.verify_profile(&admin, &verified, &true);
 
-    assert_eq!(client.get_verification_status(&pending), VerificationStatus::Pending);
-    assert_eq!(client.get_verification_status(&verified), VerificationStatus::Verified);
+    assert_eq!(
+        client.get_verification_status(&pending),
+        VerificationStatus::Pending
+    );
+    assert_eq!(
+        client.get_verification_status(&verified),
+        VerificationStatus::Verified
+    );
     assert_eq!(count_events_named(&env, "address_revoked"), 0);
 
     assert!(client.revoke(&pending));
-    assert_eq!(client.get_verification_status(&pending), VerificationStatus::Revoked);
+    assert_eq!(
+        client.get_verification_status(&pending),
+        VerificationStatus::Revoked
+    );
     let pending_profile = client.get_profile(&pending);
     assert!(!pending_profile.verified());
     assert!(pending_profile.revoked());
@@ -4258,7 +4267,10 @@ fn test_revoke_pending_verified_and_revoked_transitions() {
     assert_eq!(count_events_named(&env, "address_revoked"), 1);
 
     assert!(client.revoke(&verified));
-    assert_eq!(client.get_verification_status(&verified), VerificationStatus::Revoked);
+    assert_eq!(
+        client.get_verification_status(&verified),
+        VerificationStatus::Revoked
+    );
     let verified_profile = client.get_profile(&verified);
     assert!(!verified_profile.verified());
     assert!(verified_profile.revoked());
@@ -4267,7 +4279,13 @@ fn test_revoke_pending_verified_and_revoked_transitions() {
 
     assert!(client.revoke(&pending));
     assert!(client.revoke(&verified));
-    assert_eq!(client.get_verification_status(&pending), VerificationStatus::Revoked);
-    assert_eq!(client.get_verification_status(&verified), VerificationStatus::Revoked);
+    assert_eq!(
+        client.get_verification_status(&pending),
+        VerificationStatus::Revoked
+    );
+    assert_eq!(
+        client.get_verification_status(&verified),
+        VerificationStatus::Revoked
+    );
     assert_eq!(count_events_named(&env, "address_revoked"), 2);
 }
