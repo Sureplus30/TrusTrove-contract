@@ -722,8 +722,8 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        if !profile.verified() {
-            // Idempotent path: profile is already unverified (Pending or Revoked).
+        if profile.revoked() {
+            // Only an already revoked profile is idempotent; Pending must transition.
             // Extend TTLs so repeated admin reads don't let storage age out.
             env.storage()
                 .persistent()
