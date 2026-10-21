@@ -4235,7 +4235,11 @@ fn test_update_profile_preserves_role_flags_and_registered_at() {
 
 #[test]
 fn test_get_verification_status_renews_profile_ttl_for_all_registered_states() {
-    for state in [VerificationStatus::Pending, VerificationStatus::Verified, VerificationStatus::Revoked] {
+    for state in [
+        VerificationStatus::Pending,
+        VerificationStatus::Verified,
+        VerificationStatus::Revoked,
+    ] {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -4249,18 +4253,27 @@ fn test_get_verification_status_renews_profile_ttl_for_all_registered_states() {
         }
         let key = DataKey::Profile(issuer.clone());
         let contract_id = client.address.clone();
-        let original_ttl = env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
-        env.ledger().set_sequence_number(env.ledger().sequence() + original_ttl - 50);
+        let original_ttl =
+            env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + original_ttl - 50);
         let short_ttl = env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
         assert!(short_ttl < TTL_THRESHOLD);
         assert_eq!(client.get_verification_status(&issuer), state);
-        let renewed_ttl = env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
-        assert!(renewed_ttl >= TTL_EXTEND_TO - 1000, "status view should renew TTL");
+        let renewed_ttl =
+            env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+        assert!(
+            renewed_ttl >= TTL_EXTEND_TO - 1000,
+            "status view should renew TTL"
+        );
         assert!(renewed_ttl > short_ttl);
 
         let unknown = Address::generate(&env);
         let unknown_key = DataKey::Profile(unknown.clone());
-        assert_eq!(client.get_verification_status(&unknown), VerificationStatus::Unregistered);
+        assert_eq!(
+            client.get_verification_status(&unknown),
+            VerificationStatus::Unregistered
+        );
         env.as_contract(&contract_id, || {
             assert!(!env.storage().persistent().has(&unknown_key));
         });
