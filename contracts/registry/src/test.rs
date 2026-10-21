@@ -4241,15 +4241,21 @@ fn test_batch_issuers_invalid_late_metadata_is_atomic_for_storage_events_and_ttl
     let first = Address::generate(&env);
     let second = Address::generate(&env);
     let invalid = Address::generate(&env);
-    let valid_metadata = map![&env, (
-        String::from_str(&env, "name"),
-        String::from_str(&env, "Valid issuer")
-    )];
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid issuer")
+        )
+    ];
     // Invalid metadata is deliberately last, after two valid entries.
-    let bad_metadata = map![&env, (
-        String::from_str(&env, ""),
-        String::from_str(&env, "invalid empty key")
-    )];
+    let bad_metadata = map![
+        &env,
+        (
+            String::from_str(&env, ""),
+            String::from_str(&env, "invalid empty key")
+        )
+    ];
     let entries = vec![
         &env,
         (first.clone(), valid_metadata.clone()),
@@ -4261,17 +4267,33 @@ fn test_batch_issuers_invalid_late_metadata_is_atomic_for_storage_events_and_ttl
     let instance_ttl_before = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
 
     let result = client.try_batch_register_issuers(&entries);
-    assert!(result.is_err(), "late invalid metadata must reject the whole batch");
+    assert!(
+        result.is_err(),
+        "late invalid metadata must reject the whole batch"
+    );
 
     for address in [&first, &second, &invalid] {
         let key = DataKey::Profile(address.clone());
-        assert_eq!(client.get_verification_status(address), VerificationStatus::Unregistered);
+        assert_eq!(
+            client.get_verification_status(address),
+            VerificationStatus::Unregistered
+        );
         env.as_contract(&contract_id, || {
-            assert!(!env.storage().persistent().has(&key), "profile must not be stored");
+            assert!(
+                !env.storage().persistent().has(&key),
+                "profile must not be stored"
+            );
         });
     }
     assert_eq!(client.get_profile_count(&Role::Issuer), 0);
-    assert_eq!(env.events().all(), events_before, "failed batch must not publish events");
+    assert_eq!(
+        env.events().all(),
+        events_before,
+        "failed batch must not publish events"
+    );
     let instance_ttl_after = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
-    assert_eq!(instance_ttl_after, instance_ttl_before, "failed batch must not extend instance TTL");
+    assert_eq!(
+        instance_ttl_after, instance_ttl_before,
+        "failed batch must not extend instance TTL"
+    );
 }
