@@ -2310,16 +2310,16 @@ fn test_documented_verification_state_transitions() {
         VerificationStatus::Verified
     );
 
-    // revoke is a documented no-op on a never-verified (Pending) profile.
+    // Admin revoke transitions a never-verified (Pending) profile to Revoked.
     let pending = Address::generate(&env);
     client.register_buyer(&pending, &metadata);
     client.revoke(&pending);
     assert_eq!(
         client.get_verification_status(&pending),
-        VerificationStatus::Pending
+        VerificationStatus::Revoked
     );
 
-    // Pending -> Revoked via verify_profile(_, false) (admin or verifier).
+    // Revoked remains Revoked via verify_profile(_, false) (admin or verifier).
     client.verify_profile(&admin, &pending, &false);
     assert_eq!(
         client.get_verification_status(&pending),
