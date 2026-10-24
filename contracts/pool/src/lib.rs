@@ -30,6 +30,8 @@ pub use types::*;
 /// the default: `totals()`'s fallback reads the same constant, so the two call
 /// sites can never silently desync if the default is ever changed.
 pub const DEFAULT_MAX_UTILIZATION_BPS: u32 = 8500;
+/// Maximum utilization cap accepted by `set_max_utilization` (100%).
+pub const MAX_UTILIZATION_BPS: u32 = 10_000;
 
 /// Upper bound for the admin-settable minimum discount floor enforced by
 /// `set_min_discount` (`DataKey::MinDiscountBps`, issue #829). 5000 bps = 50%
@@ -2262,7 +2264,7 @@ impl PoolContract {
     pub fn set_max_utilization(env: Env, admin: Address, new_cap_bps: u32) -> bool {
         require_not_paused(&env);
         admin.require_auth();
-        if new_cap_bps > 10000 {
+        if new_cap_bps > MAX_UTILIZATION_BPS {
             panic_with_error!(&env, PoolError::InvalidAmount);
         }
         let old_cap_bps = Self::totals(&env).max_utilization_bps;

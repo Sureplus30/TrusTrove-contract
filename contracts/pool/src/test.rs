@@ -1848,8 +1848,23 @@ fn test_set_max_utilization_emits_event() {
         (10000, 8500)
     );
 
+    // A later successful change reports the just-replaced value as its old
+    // cap, preserving a complete transition history for event consumers.
+    te.pool.set_max_utilization(&te.admin, &9000);
+    let events = te.env.events().all();
+    let (_, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(topics.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "max_utilization_updated")
+    );
+    assert_eq!(
+        <(u32, u32)>::try_from_val(&te.env, &data).unwrap(),
+        (8500, 9000)
+    );
+
     // The storage update itself is still reflected in get_stats.
-    assert_eq!(te.pool.get_stats().max_utilization_bps, 8500);
+    assert_eq!(te.pool.get_stats().max_utilization_bps, 9000);
 
     // A rejected update (> 10000) must not emit the event.
     assert!(te.pool.try_set_max_utilization(&te.admin, &10001).is_err());

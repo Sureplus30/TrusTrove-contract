@@ -82,6 +82,9 @@ pub fn invoice_defaulted(env: &Env, invoice_id: &BytesN<32>, loss_amount: u128) 
     );
 }
 
+/// Publish the old and new utilization caps as the event data tuple.
+///
+/// Topic: `max_utilization_updated`; data: `(old_cap_bps, new_cap_bps)`.
 pub fn max_utilization_updated(env: &Env, old_cap_bps: u32, new_cap_bps: u32) {
     env.events().publish(
         (Symbol::new(env, "max_utilization_updated"),),
