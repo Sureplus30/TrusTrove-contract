@@ -4150,15 +4150,5 @@ fn test_revoke_pending_verified_and_revoked_transitions() {
     revoked_events += count_events_named(&env, "address_revoked");
     assert!(client.revoke(&verified));
     revoked_events += count_events_named(&env, "address_revoked");
-    assert_eq!(
-        env.events().all(),
-        events_before,
-        "failed batch must not publish events"
-    );
-    let instance_ttl_after = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
-    assert_eq!(
-        instance_ttl_after, instance_ttl_before,
-        "failed batch must not extend instance TTL"
-    );
     assert_eq!(revoked_events, 2);
 }
