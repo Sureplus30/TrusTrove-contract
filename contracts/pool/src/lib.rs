@@ -801,6 +801,24 @@ impl PoolContract {
     /// (remaining shares reach zero), `LPInitialDeposit` and `LPDepositCount`
     /// are removed so a subsequent deposit starts a fresh accounting cycle.
     ///
+    /// # Integer Accounting and Rounding Invariants
+    /// Both the redemption amount and the principal portion calculation use
+    /// integer division which truncates toward zero:
+    /// - `usdc_to_return = (shares * total_deposits) / total_shares`
+    /// - `principal_portion = (shares * lp_initial_deposit) / lp_shares`
+    ///
+    /// Across any partial withdrawal:
+    /// - `TotalShares` is decremented by exactly `shares`, strictly matching the
+    ///   sum of all surviving LP share balances.
+    /// - `TotalDeposits` is decremented by `usdc_to_return`. Because integer division
+    ///   rounds down, any fractional remainder stays in `TotalDeposits`, preserving
+    ///   solvency (`total_deposits >= sum(lp_position.usdc_value)`) and ensuring the
+    ///   effective share price for remaining shares never drops due to another LP's
+    ///   withdrawal.
+    /// - The LP's tracked principal is decremented by `principal_portion` (with any
+    ///   rounding remainder staying in `LPInitialDeposit`), and realised yield is
+    ///   credited as `usdc_to_return.saturating_sub(principal_portion)`.
+    ///
     /// # Returns
     /// * `u128` - The amount of USDC returned.
     ///
@@ -1088,8 +1106,14 @@ impl PoolContract {
     /// let remaining = client.allowance(&lp, &staking);
     /// ```
     pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
+        let key = DataKey::Allowance(from.clone(), spender.clone());
         match Self::live_allowance(&env, &from, &spender) {
-            Some(record) => record.amount,
+            Some(record) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                record.amount
+            }
             None => 0,
         }
     }
@@ -1335,10 +1359,14 @@ impl PoolContract {
             panic_with_error!(&env, PoolError::InvoiceNotListed);
         }
 
-        let issuer = ctx.issuer.clone();
+        // Keep the canonical issuer from the invoice context for both escrow
+        // callbacks. Escrow records this value during the pool-authorized lock
+        // and validates the release recipient against that record; it must not
+        // call back through this active pool frame to resolve the invoice again.
+        let canonical_issuer = ctx.issuer;
         let registry_id = Self::registry_contract(&env);
         let mut args = Vec::new(&env);
-        args.push_back(issuer.clone().into_val(&env));
+        args.push_back(canonical_issuer.clone().into_val(&env));
         let issuer_verified: bool =
             env.invoke_contract(&registry_id, &Symbol::new(&env, "is_verified"), args);
         if !issuer_verified {
@@ -1449,7 +1477,7 @@ impl PoolContract {
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
         args.push_back(funded_amount.into_val(&env));
-        args.push_back(issuer.clone().into_val(&env));
+        args.push_back(canonical_issuer.clone().into_val(&env));
         let _: bool = env.invoke_contract(&escrow_contract, &Symbol::new(&env, "lock"), args);
 
         let pool_address = env.current_contract_address();
@@ -1470,7 +1498,7 @@ impl PoolContract {
         // out-of-band lock removal.
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
-        args.push_back(issuer.into_val(&env));
+        args.push_back(canonical_issuer.into_val(&env));
         let _: bool = env.invoke_contract(
             &escrow_contract,
             &Symbol::new(&env, "release_to_issuer"),
@@ -1548,7 +1576,7 @@ impl PoolContract {
         funded
     }
 
-    /// Receives invoice repayment and updates pool liquidity metrics.
+    /// Receives invoice repayment, updates pool liquidity metrics, and emits `repayment_received`.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1588,8 +1616,8 @@ impl PoolContract {
         true
     }
 
-    /// Receives invoice repayment with a partial refund to the buyer and updates
-    /// pool liquidity metrics.
+    /// Receives invoice repayment with a partial refund to the buyer, updates
+    /// pool liquidity metrics, and emits `repayment_received`.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1754,14 +1782,14 @@ impl PoolContract {
     ///    band and `EscrowDefaultNotReleased` trips (#21).
     /// 2. Calls `invoice.mark_defaulted()` to persist the `Defaulted` status
     ///    on the invoice record, update the status index, and emit the
-    ///    `invoice_defaulted` event.
-    /// 3. Updates the pool's local accounting and removes the funded invoice
-    ///    entry. When escrow returned the principal (`true`), only
-    ///    `TotalFunded`, `TotalLossRealised`, and `ActiveInvoiceCount`
-    ///    change — `TotalDeposits` is left untouched because the recovered
-    ///    principal backs it (issue #439). When the principal was already
-    ///    with the issuer, `TotalDeposits` additionally shrinks by the funded
-    ///    amount so deposit accounting keeps matching the pool's token
+    ///    invoice contract's `invoice_defaulted` event.
+    /// 3. Updates the pool's local accounting, removes the funded invoice
+    ///    entry, and emits the pool's `invoice_defaulted` event. When escrow returned
+    ///    the principal (`true`), only `TotalFunded`, `TotalLossRealised`, and
+    ///    `ActiveInvoiceCount` change — `TotalDeposits` is left untouched because
+    ///    the recovered principal backs it (issue #439). When the principal was
+    ///    already with the issuer, `TotalDeposits` additionally shrinks by the
+    ///    funded amount so deposit accounting keeps matching the pool's token
     ///    balance; shares are not burned, the loss surfaces as a lower share
     ///    price.
     ///
@@ -2225,9 +2253,22 @@ impl PoolContract {
     /// let funded = client.get_funded_amount(&invoice_id);
     /// ```
     pub fn get_funded_amount(env: Env, invoice_id: BytesN<32>) -> Option<u128> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::FundedInvoice(invoice_id))
+        let key = DataKey::FundedInvoice(invoice_id.clone());
+        let buyer_key = DataKey::FundedInvoiceBuyer(invoice_id);
+        if env.storage().persistent().has(&buyer_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&buyer_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        }
+        match env.storage().persistent().get::<_, u128>(&key) {
+            Some(amount) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                Some(amount)
+            }
+            None => None,
+        }
     }
 
     /// Updates the pool's maximum utilization cap.
