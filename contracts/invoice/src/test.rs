@@ -254,7 +254,17 @@ pub struct MockAgentRegistry;
 #[contractimpl]
 impl MockAgentRegistry {
     pub fn get_agent(env: Env, agent_id: Symbol) -> Option<crate::Agent> {
+        let count_key = Symbol::new(&env, "get_agent_calls");
+        let calls: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
+        env.storage().instance().set(&count_key, &(calls + 1));
         env.storage().persistent().get(&AgentKey(agent_id))
+    }
+
+    pub fn get_agent_calls(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "get_agent_calls"))
+            .unwrap_or(0)
     }
 
     pub fn register_agent(env: Env, agent_id: Symbol, agent: crate::Agent) {
@@ -398,6 +408,153 @@ fn test_get_attestation_persists_signed_payload_and_submission_time() {
 }
 
 // ============== FAILURE-PATH TESTS FOR submit_attestation ==============
+
+fn signed_attestation_for_risk_score(
+    env: &Env,
+    client: &InvoiceContractClient,
+    invoice_id: &BytesN<32>,
+    risk_score: u32,
+) -> (soroban_sdk::Bytes, BytesN<65>) {
+    let agent_id = Symbol::new(env, "risk_score_agent");
+    let registry_id = env.register(MockAgentRegistry, ());
+    MockAgentRegistryClient::new(env, &registry_id).register_agent(
+        &agent_id,
+        &crate::Agent {
+            active: true,
+            pubkey: test_agent_pubkey(env),
+        },
+    );
+    client.set_agent_registry_contract(&registry_id);
+
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+        risk_score,
+        evidence_hash: BytesN::from_array(env, &[9u8; 32]),
+        agent_id,
+        nonce: 1,
+        valid_until: u64::MAX,
+    };
+    let payload_bytes = payload.to_xdr(env);
+    let digest = env.crypto().keccak256(&payload_bytes).to_array();
+    let (sig, recid) = test_agent_signing_key()
+        .sign_prehash_recoverable(&digest)
+        .unwrap();
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
+    sig_bytes[64] = recid.to_byte();
+    (payload_bytes, BytesN::from_array(env, &sig_bytes))
+}
+
+#[test]
+fn test_submit_attestation_accepts_and_stores_zero_risk_score() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let (payload, signature) = signed_attestation_for_risk_score(&env, &client, &invoice_id, 0);
+
+    client.submit_attestation(&invoice_id, &payload, &signature);
+
+    assert_eq!(client.get_attestation(&invoice_id).unwrap().risk_score, 0);
+}
+
+#[test]
+fn test_submit_attestation_accepts_and_stores_maximum_risk_score() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let (payload, signature) =
+        signed_attestation_for_risk_score(&env, &client, &invoice_id, 10_000);
+
+    client.submit_attestation(&invoice_id, &payload, &signature);
+
+    assert_eq!(
+        client.get_attestation(&invoice_id).unwrap().risk_score,
+        10_000
+    );
+}
+
+#[test]
+fn test_submit_attestation_rejects_risk_score_above_maximum_with_typed_error() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let (payload, signature) =
+        signed_attestation_for_risk_score(&env, &client, &invoice_id, 10_001);
+
+    let result = client.try_submit_attestation(&invoice_id, &payload, &signature);
+    let err = result
+        .expect_err("risk score above 10,000 must be rejected")
+        .expect("rejection should be a typed InvoiceError");
+    assert_eq!(err, InvoiceError::InvalidRiskScore.into());
+    assert!(client.get_attestation(&invoice_id).is_none());
+}
+
+#[test]
+fn test_submit_attestation_rejects_malformed_payload_with_typed_error() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    // This is valid ScVal XDR but the wrong value type for AttestationPayload.
+    let payload = 0u32.to_xdr(&env);
+    let signature = BytesN::from_array(&env, &[0u8; 65]);
+
+    let result = client.try_submit_attestation(&invoice_id, &payload, &signature);
+    let err = result
+        .expect_err("malformed payload must be rejected")
+        .expect("rejection should be a typed InvoiceError");
+
+    assert_eq!(err, InvoiceError::InvalidAmount.into());
+    assert!(client.get_attestation(&invoice_id).is_none());
+    let contract_id = client.address.clone();
+    let emitted_attestation = env.events().all().iter().any(|event| {
+        let (contract, topics, _) = event;
+        if contract != contract_id {
+            return false;
+        }
+        let topic0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        topic0 == Symbol::new(&env, "attestation_submitted")
+    });
+    assert!(!emitted_attestation);
+}
+#[test]
+fn test_submit_attestation_rejects_invalid_recovery_id_before_registry_lookup() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let agent_id = Symbol::new(&env, "test_agent");
+    let registry_id = env.register(MockAgentRegistry, ());
+    let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
+    client.set_agent_registry_contract(&registry_id);
+
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+        risk_score: 5000,
+        evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
+        agent_id,
+        nonce: 1,
+        valid_until: u64::MAX,
+    };
+    let payload_bytes = payload.to_xdr(&env);
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[64] = 4;
+    let signature = BytesN::from_array(&env, &sig_bytes);
+
+    let result = client.try_submit_attestation(&invoice_id, &payload_bytes, &signature);
+    assert_eq!(
+        result,
+        Err(Ok(InvoiceError::InvalidRecoveryId.into())),
+        "invalid recovery id should return the typed error"
+    );
+    assert_eq!(registry_client.get_agent_calls(), 0);
+    assert!(client.get_attestation(&invoice_id).is_none());
+}
 
 #[test]
 #[should_panic(expected = "Error(Contract, #21)")]
@@ -3802,6 +3959,28 @@ fn test_add_supported_asset() {
     <()>::try_from_val(&env, &data).unwrap();
 }
 
+#[test]
+fn test_add_supported_asset_rejects_counter_overflow_without_writing_asset() {
+    let (env, client, _, _, _, _) = setup();
+    let asset = Address::generate(&env);
+
+    // Simulate corrupt/adversarial storage where the counter is exhausted.
+    env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .set(&crate::DataKey::SupportedAssetCount, &u32::MAX);
+    });
+
+    assert_eq!(
+        client.try_add_supported_asset(&asset),
+        Err(Ok(InvoiceError::MathOverflow.into())),
+    );
+
+    // The failed call must not write the asset or move the counter.
+    assert!(!client.is_supported_asset(&asset));
+    assert_eq!(client.get_supported_asset_count(), u32::MAX);
+}
+
 // ============================== REPAY TESTS ==============================
 
 #[test]
@@ -6835,5 +7014,40 @@ fn test_extend_issuer_and_buyer_index_duplicate_append_is_noop() {
     assert_eq!(
         client.get_by_buyer(&buyer, &0, &20).get(1).unwrap().id,
         second
+    );
+}
+
+#[test]
+fn test_add_supported_asset_twice_increments_count_once() {
+    let (env, client, _, _, _, _) = setup();
+    let asset = Address::generate(&env);
+    let before = client.get_supported_asset_count();
+
+    assert!(!client.is_supported_asset(&asset));
+    client.add_supported_asset(&asset);
+    client.add_supported_asset(&asset);
+
+    assert!(client.is_supported_asset(&asset));
+    assert_eq!(
+        client.get_supported_asset_count(),
+        before + 1,
+        "adding the same asset twice must increment the counter only once"
+    );
+}
+
+#[test]
+fn test_remove_supported_asset_twice_decrements_count_once() {
+    let (_env, client, _, _, _, usdc) = setup();
+    let before = client.get_supported_asset_count();
+
+    assert!(client.is_supported_asset(&usdc));
+    client.remove_supported_asset(&usdc);
+    client.remove_supported_asset(&usdc);
+
+    assert!(!client.is_supported_asset(&usdc));
+    assert_eq!(
+        client.get_supported_asset_count(),
+        before - 1,
+        "removing the same asset twice must decrement the counter only once"
     );
 }
