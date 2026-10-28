@@ -282,16 +282,25 @@ pub struct AgentKey(Symbol);
 // ensures the invoice contract handles external call failures gracefully
 // without persisting state or emitting success events.
 
-#[contract]
-pub struct FailingAgentRegistry;
+// Isolated in its own module to avoid a generated `__get_agent` symbol
+// collision with the top-level MockAgentRegistry (both export `get_agent`
+// and `#[contractimpl]` would produce the same dispatch name if they were
+// at the same module level).
+mod failing_agent_registry_mock {
+    use super::*;
 
-#[contractimpl]
-impl FailingAgentRegistry {
-    pub fn get_agent(_env: Env, _agent_id: Symbol) -> Option<crate::Agent> {
-        // Trap on any get_agent call to simulate registry failure
-        soroban_sdk::panic_with_error!(&_env, soroban_sdk::Error::from_contract_error(99))
+    #[contract]
+    pub struct FailingAgentRegistry;
+
+    #[contractimpl]
+    impl FailingAgentRegistry {
+        pub fn get_agent(_env: Env, _agent_id: Symbol) -> Option<crate::Agent> {
+            // Trap on any get_agent call to simulate registry failure
+            soroban_sdk::panic_with_error!(&_env, soroban_sdk::Error::from_contract_error(99))
+        }
     }
 }
+use failing_agent_registry_mock::FailingAgentRegistry;
 
 use trusttrove_test_utils::{test_agent_pubkey, test_agent_signing_key};
 
@@ -779,17 +788,25 @@ fn test_submit_attestation_agent_registry_external_failure() {
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
     // Deploy a failing agent registry that traps on get_agent
-    let failing_registry_id = env.register_contract(None, FailingAgentRegistry);
+    let failing_registry_id = env.register(FailingAgentRegistry, ());
     client.set_agent_registry_contract(&failing_registry_id);
 
     let agent_id = Symbol::new(&env, "test_agent");
+    // Populate all v2 payload fields so validation passes checks 2-6 in
+    // submit_attestation and control reaches the env.invoke_contract call at
+    // step 7, where the failing registry traps. Without contract_address,
+    // network_id, and valid_until the payload would fail PayloadBindingMismatch
+    // or AttestationExpired before the registry is ever consulted.
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -801,12 +818,19 @@ fn test_submit_attestation_agent_registry_external_failure() {
     sig_bytes[64] = recid.to_byte();
     let signature = BytesN::from_array(&env, &sig_bytes);
 
-    // Record event count before the call
-    let events_before = env.events().all().len();
-
-    // The call should fail because the registry traps on get_agent
+    // The call should fail because the registry traps on get_agent.
     let result = client.try_submit_attestation(&invoice_id, &payload_bytes, &signature);
-    assert!(result.is_err(), "registry failure must cause transaction to fail");
+
+    // Assert the expected host/contract error boundary: the registry raises
+    // contract error 99 via panic_with_error!, which propagates through
+    // submit_attestation's infallible invoke_contract and is caught here as
+    // Err(Ok(Error::from_contract_error(99))). This is a captured contract
+    // error, not a raw host trap (Err(Err(_))).
+    assert_eq!(
+        result,
+        Err(Ok(soroban_sdk::Error::from_contract_error(99))),
+        "registry failure must propagate as contract error 99"
+    );
 
     // AC2: no attestation was persisted, and no attestation_submitted event
     // was emitted. The transaction must fail atomically without side effects.
@@ -814,9 +838,11 @@ fn test_submit_attestation_agent_registry_external_failure() {
         client.get_attestation(&invoice_id).is_none(),
         "failed attestation must not be stored"
     );
+    // SDK >=22 resets the event buffer per top-level invocation, so the
+    // failed call's buffer must be empty (no attestation_submitted event).
     assert_eq!(
         env.events().all().len(),
-        events_before,
+        0,
         "failed attestation must not emit attestation_submitted"
     );
 }
