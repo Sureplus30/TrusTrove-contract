@@ -1392,7 +1392,10 @@ fn test_batch_issuers_invalid_late_metadata_is_atomic_for_storage_events_and_ttl
     ];
     let invalid_metadata = map![
         &env,
-        (String::from_str(&env, ""), String::from_str(&env, "invalid"))
+        (
+            String::from_str(&env, ""),
+            String::from_str(&env, "invalid")
+        )
     ];
     let entries = vec![
         &env,
