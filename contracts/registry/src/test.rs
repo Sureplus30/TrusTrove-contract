@@ -1376,7 +1376,6 @@ fn test_batch_register_issuers_invalid_metadata_leaves_state_clean() {
     );
 }
 
-
 #[test]
 fn test_batch_issuers_invalid_late_metadata_is_atomic_for_storage_events_and_ttl() {
     let (env, _admin, client) = setup();
@@ -1411,9 +1410,7 @@ fn test_batch_issuers_invalid_late_metadata_is_atomic_for_storage_events_and_ttl
     let count_key = DataKey::ProfileCount(Role::Issuer);
     let index_key = DataKey::ProfileIndex(Role::Issuer, 0);
 
-    let instance_ttl_before = env.as_contract(&contract_id, || {
-        env.storage().instance().get_ttl()
-    });
+    let instance_ttl_before = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
     env.as_contract(&contract_id, || {
         for key in &profile_keys {
             assert!(!env.storage().persistent().has(key));
@@ -1423,17 +1420,33 @@ fn test_batch_issuers_invalid_late_metadata_is_atomic_for_storage_events_and_ttl
     });
 
     let outcome = client.try_batch_register_issuers(&entries);
-    assert!(outcome.is_err(), "invalid metadata in a later entry must reject the batch");
+    assert!(
+        outcome.is_err(),
+        "invalid metadata in a later entry must reject the batch"
+    );
     assert_eq!(count_events_named(&env, "issuer_registered"), 0);
     assert_eq!(count_events_named(&env, "batch_registered"), 0);
-    assert_eq!(env.events().all().len(), 0, "failed batch must not emit any events");
+    assert_eq!(
+        env.events().all().len(),
+        0,
+        "failed batch must not emit any events"
+    );
 
     env.as_contract(&contract_id, || {
         for key in &profile_keys {
-            assert!(!env.storage().persistent().has(key), "failed batch persisted a profile");
+            assert!(
+                !env.storage().persistent().has(key),
+                "failed batch persisted a profile"
+            );
         }
-        assert!(!env.storage().persistent().has(&count_key), "failed batch wrote the issuer count");
-        assert!(!env.storage().persistent().has(&index_key), "failed batch wrote the issuer index");
+        assert!(
+            !env.storage().persistent().has(&count_key),
+            "failed batch wrote the issuer count"
+        );
+        assert!(
+            !env.storage().persistent().has(&index_key),
+            "failed batch wrote the issuer index"
+        );
         assert_eq!(env.storage().instance().get_ttl(), instance_ttl_before);
     });
 }
